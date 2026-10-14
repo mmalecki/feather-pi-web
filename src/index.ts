@@ -7,10 +7,9 @@ export * from './websearch.ts';
 
 /**
  * webfetch, and websearch when PARALLEL_API_KEY is set. WEBFETCH_COMPACT_MODEL picks the
- * `provider/model` that summarizes fetched pages (the session's model by default), or `off`.
+ * `provider/model` that summarizes fetched pages when asked to (the session's model by default).
  */
 export default function (pi: ExtensionAPI) {
-  const compactModel = process.env.WEBFETCH_COMPACT_MODEL || undefined;
-  pi.registerTool(webFetchTool(compactModel === 'off' ? { compact: false } : { compactModel }));
+  pi.registerTool(webFetchTool({ compactModel: process.env.WEBFETCH_COMPACT_MODEL || undefined }));
   if (process.env.PARALLEL_API_KEY) pi.registerTool(webSearchTool());
 }
