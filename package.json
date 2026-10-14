@@ -10,12 +10,9 @@
   "author": "Maciej Małecki <me@mmalecki.com>",
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./index.ts"
     ]
   },
-  "files": [
-    "src"
-  ],
   "scripts": {
     "typecheck": "tsc --noEmit"
   },

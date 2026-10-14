@@ -1,6 +1,6 @@
 import { type Api, type Model, Type, type Usage } from '@earendil-works/pi-ai';
 import { defineTool, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { htmlToMarkdown } from './html.ts';
+import { htmlToMarkdown } from './utils/html.ts';
 
 export interface WebFetchOptions {
   /** Whether the page is summarized when the model doesn't say. */
