@@ -1,5 +1,5 @@
 {
-  "name": "feather-pi-web",
+  "name": "@mmalecki/feather-pi-web",
   "version": "0.1.0",
   "description": "Lean web search and web fetch tools for pi, aimed at smaller models",
   "keywords": [
