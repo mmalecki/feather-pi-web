@@ -3,7 +3,7 @@ import { defineTool, type ExtensionContext } from '@earendil-works/pi-coding-age
 import { htmlToMarkdown } from './html.ts';
 
 export interface WebFetchOptions {
-  /** Summarize the page with a model before returning it. */
+  /** Whether the page is summarized when the model doesn't say. */
   compact: boolean;
   /** `provider/model` to compact with. Defaults to the session's model. */
   compactModel: string | undefined;
@@ -16,7 +16,7 @@ export interface WebFetchOptions {
 }
 
 export const defaultWebFetchOptions: WebFetchOptions = {
-  compact: true,
+  compact: false,
   compactModel: undefined,
   compactPrompt:
     'Compact the following web page into a summary for another agent. ' +
@@ -50,6 +50,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
     parameters: Type.Object({
       url: Type.String({ description: 'http(s) URL' }),
       focus: Type.Optional(Type.String({ description: 'What to look for on the page' })),
+      compact: Type.Optional(Type.Boolean({ description: 'Summarize the page instead of returning it whole', default: options.compact })),
     }),
     annotations: { readOnlyHint: true, openWorldHint: true },
 
@@ -89,7 +90,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
 
       let usage: Usage | undefined;
       let compactedBy: string | undefined;
-      const model = options.compact ? compactModel(ctx, options.compactModel) : undefined;
+      const model = (params.compact ?? options.compact) ? compactModel(ctx, options.compactModel) : undefined;
       if (!text) text = '[Page has no readable content]';
       else if (model) {
         ({ text, usage } = await compact(ctx, model, {
