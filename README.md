@@ -2,7 +2,9 @@
 Lean web search and web fetch tools for [pi](https://pi.dev), aimed at smaller models.
 
 * `webfetch` - fetches a page and reduces it to the markdown of its main content (up to 50k characters). With
-  `compact`, a model summarizes it (with an optional `focus`) before it reaches the agent's context
+  `compact`, a model summarizes it (with an optional `focus`) before it reaches the agent's context.
+  Images come back as attachments, converted and scaled the way pi's `read` tool does it (following the
+  `images.autoResize` setting)
 * `websearch` - searches through [Parallel](https://parallel.ai)'s Search API, which returns markdown excerpts per result
 
 ## Installation

@@ -1,5 +1,5 @@
-import { type Api, type Model, Type, type Usage } from '@earendil-works/pi-ai';
-import { defineTool, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { type Api, type ImageContent, type Model, Type, type Usage } from '@earendil-works/pi-ai';
+import { convertToPng, defineTool, type ExtensionContext, formatDimensionNote, resizeImage } from '@earendil-works/pi-coding-agent';
 import { htmlToMarkdown } from './utils/html.ts';
 
 export interface WebFetchOptions {
@@ -11,6 +11,8 @@ export interface WebFetchOptions {
   /** Page text beyond this many characters is dropped (before compaction). */
   maxChars: number;
   maxBytes: number;
+  /** Whether images are scaled down to the model's limits. Asked per fetch, so settings can change mid-session. */
+  autoResizeImages: () => boolean;
   timeoutMs: number;
   userAgent: string;
 }
@@ -25,6 +27,7 @@ export const defaultWebFetchOptions: WebFetchOptions = {
     'and say so if the page does not cover it. Reply with the summary only.',
   maxChars: 50_000,
   maxBytes: 5 * 1024 * 1024,
+  autoResizeImages: () => true,
   timeoutMs: 30_000,
   userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36',
 };
@@ -34,10 +37,16 @@ export interface WebFetchDetails {
   title: string | undefined;
   /** `provider/model` that compacted the page, if one did. */
   compactedBy: string | undefined;
+  /** MIME type of the attached image, if the URL was one. */
+  image: string | undefined;
 }
 
 const MARKDOWN_TYPES = /^(text\/(markdown|x-markdown|plain|csv)|application\/(json|xml|[\w.+-]+\+(json|xml)))\b/;
 const HTML_TYPES = /^(text\/html|application\/xhtml\+xml)\b/;
+// SVG is markup, not pixels.
+const IMAGE_TYPES = /^image\/(?!svg)/;
+/** What models take inline; anything else is converted to PNG first. */
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
   const options = { ...defaultWebFetchOptions, ...overrides };
@@ -45,8 +54,8 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
   return defineTool({
     name: 'webfetch',
     label: 'Web Fetch',
-    description: 'Fetch a web page and return its content as markdown.',
-    promptSnippet: 'Fetch a web page as markdown',
+    description: 'Fetch a web page and return its content as markdown. Images (jpg, png, gif, webp, bmp) are returned as attachments.',
+    promptSnippet: 'Fetch a web page as markdown, or an image',
     parameters: Type.Object({
       url: Type.String({ description: 'http(s) URL' }),
       focus: Type.Optional(Type.String({ description: 'What to look for on the page' })),
@@ -64,7 +73,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
         headers: {
           'user-agent': options.userAgent,
           // Prefer servers that can hand us markdown directly.
-          accept: 'text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.8, */*;q=0.1',
+          accept: 'text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.8, image/*;q=0.5, */*;q=0.1',
           'accept-language': 'en-US,en;q=0.9',
         },
       });
@@ -72,7 +81,22 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
 
       const finalUrl = response.url || url.href;
       const type = response.headers.get('content-type')?.toLowerCase() ?? '';
-      const body = await readText(response, options.maxBytes, type);
+      const bytes = await readBody(response, options.maxBytes);
+
+      // Servers mislabel images often enough that unnamed binary is worth a look.
+      const imageType = IMAGE_TYPES.test(type) ? baseType(type) : !type || baseType(type) === 'application/octet-stream' ? sniffImage(bytes) : undefined;
+      if (imageType) {
+        const { image, notes } = await processImage(bytes, imageType, ctx, options.autoResizeImages());
+        if (ctx.model && !ctx.model.input.includes('image')) {
+          notes.push('[Current model does not support images. The image will be omitted from this request.]');
+        }
+        return {
+          content: [{ type: 'text', text: [`URL: ${finalUrl}`, '', `Image [${image?.mimeType ?? imageType}]`, ...notes].join('\n') }, ...(image ? [image] : [])],
+          details: { url: finalUrl, title: undefined, compactedBy: undefined, image: image?.mimeType } satisfies WebFetchDetails,
+        };
+      }
+
+      const body = decoder(type).decode(bytes);
 
       let title: string | undefined;
       let text: string;
@@ -105,7 +129,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
       const header = [title && `# ${title}`, `URL: ${finalUrl}`].filter(Boolean).join('\n');
       return {
         content: [{ type: 'text', text: `${header}\n\n${text}` }],
-        details: { url: finalUrl, title, compactedBy } satisfies WebFetchDetails,
+        details: { url: finalUrl, title, compactedBy, image: undefined } satisfies WebFetchDetails,
         ...(usage ? { usage } : {}),
       };
     },
@@ -165,7 +189,7 @@ function parseUrl(raw: string): URL {
   return url;
 }
 
-async function readText(response: Response, maxBytes: number, type: string): Promise<string> {
+async function readBody(response: Response, maxBytes: number): Promise<Buffer> {
   const length = Number(response.headers.get('content-length'));
   if (length > maxBytes) throw new Error(`Response too large (${length} bytes, limit ${maxBytes})`);
 
@@ -179,7 +203,7 @@ async function readText(response: Response, maxBytes: number, type: string): Pro
     }
     chunks.push(chunk);
   }
-  return decoder(type).decode(Buffer.concat(chunks));
+  return Buffer.concat(chunks);
 }
 
 function decoder(type: string): TextDecoder {
@@ -189,4 +213,44 @@ function decoder(type: string): TextDecoder {
   } catch {
     return new TextDecoder();
   }
+}
+
+function baseType(type: string): string {
+  const base = type.replace(/;.*/s, '').trim();
+  return base === 'image/jpg' ? 'image/jpeg' : base;
+}
+
+function sniffImage(bytes: Buffer): string | undefined {
+  const at = (offset: number, magic: string) => bytes.toString('latin1', offset, offset + magic.length) === magic;
+  if (at(0, '\xff\xd8\xff')) return 'image/jpeg';
+  if (at(0, '\x89PNG\r\n\x1a\n')) return 'image/png';
+  if (at(0, 'GIF87a') || at(0, 'GIF89a')) return 'image/gif';
+  if (at(0, 'RIFF') && at(8, 'WEBP')) return 'image/webp';
+  return undefined;
+}
+
+/**
+ * Prepares an image the way pi's read tool does: converted to a type models take inline and scaled
+ * to the model's limits. No image when that fails; the notes say why, or how it was changed.
+ */
+async function processImage(bytes: Buffer, mimeType: string, ctx: ExtensionContext, autoResize: boolean): Promise<{ image: ImageContent | undefined; notes: string[] }> {
+  const notes: string[] = [];
+  let image: ImageContent = { type: 'image', data: bytes.toString('base64'), mimeType };
+
+  if (!INLINE_IMAGE_TYPES.has(mimeType)) {
+    const png = await convertToPng(image.data, mimeType);
+    if (!png) return { image: undefined, notes: ['[Image omitted: could not be converted to a supported inline image format.]'] };
+    image = { type: 'image', ...png };
+    notes.push(`[Image converted from ${mimeType} to ${png.mimeType}.]`);
+  }
+
+  if (autoResize) {
+    const resized = await resizeImage(Buffer.from(image.data, 'base64'), image.mimeType, ctx.model?.inputLimits?.images?.resize);
+    if (!resized) return { image: undefined, notes: ['[Image omitted: could not be resized below the inline image size limit.]'] };
+    image = { type: 'image', data: resized.data, mimeType: resized.mimeType };
+    const note = formatDimensionNote(resized);
+    if (note) notes.push(note);
+  }
+
+  return { image, notes };
 }
