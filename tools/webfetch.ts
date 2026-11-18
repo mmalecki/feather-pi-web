@@ -46,7 +46,7 @@ export interface WebFetchDetails {
   image: string | undefined;
 }
 
-const MARKDOWN_TYPES = /^(text\/(markdown|x-markdown|plain|csv)|application\/(json|xml|[\w.+-]+\+(json|xml)))\b/;
+const TEXT_TYPES = /^(text\/[\w.+-]+|application\/(json|xml|[\w.+-]+\+(json|xml)))\b/;
 const HTML_TYPES = /^(text\/html|application\/xhtml\+xml)\b/;
 // SVG is markup, not pixels.
 const IMAGE_TYPES = /^image\/(?!svg)/;
@@ -109,7 +109,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
       const body = decoder(type).decode(bytes);
 
       const html = HTML_TYPES.test(type) || (!type && /^\s*</.test(body));
-      if (!html && type && !MARKDOWN_TYPES.test(type)) throw new Error(`Unsupported content type "${type}" at ${url}`);
+      if (!html && type && !TEXT_TYPES.test(type)) throw new Error(`Unsupported content type "${type}" at ${url}`);
 
       const raw = params.raw ?? false;
       let title: string | undefined;
