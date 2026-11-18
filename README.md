@@ -20,6 +20,7 @@ Or try it for one run with `pi -e /path/to/feather-pi-web`.
 * `PARALLEL_API_KEY` - enables `websearch`
 * `WEBFETCH_COMPACT_MODEL` - the `provider/model` that summarizes fetched pages, e.g. a small local one.
   Defaults to the session's model.
-* `WEBFETCH_MAX_RAW_CHARS` - the most characters of page source a `raw` fetch returns. Defaults to 150000.
+* `WEBFETCH_MAX_RAW_CHARS` - the most characters of page source a `raw` fetch returns, whatever the model's
+  context window. Defaults to 150000, or a quarter of the context window if that is less.
 
 Summarizing runs without thinking, and its token usage counts towards the session's.

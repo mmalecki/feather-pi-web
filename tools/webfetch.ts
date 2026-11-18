@@ -10,7 +10,7 @@ export interface WebFetchOptions {
   compactPrompt: string;
   /** Page text beyond this many characters is dropped (before compaction). */
   maxChars: number;
-  /** The same for unprocessed page source (`raw`). Models with small context windows get less, see `rawLimit`. */
+  /** The same for unprocessed page source (`raw`). Unless overridden, models with small context windows get less, see `rawLimit`. */
   maxRawChars: number;
   maxBytes: number;
   /** Whether images are scaled down to the model's limits. Asked per fetch, so settings can change mid-session. */
@@ -55,6 +55,8 @@ const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'ima
 
 export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
   const options = { ...defaultWebFetchOptions, ...overrides };
+  // A cap someone chose is theirs to get wrong; only the default bends to the model.
+  const scaleRaw = overrides.maxRawChars === undefined;
 
   return defineTool({
     name: 'webfetch',
@@ -116,7 +118,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
       else if (html) ({ title, markdown: text } = htmlToMarkdown(body, finalUrl));
       else text = body.trim();
 
-      const maxChars = raw ? rawLimit(ctx, options.maxRawChars) : options.maxChars;
+      const maxChars = !raw ? options.maxChars : scaleRaw ? rawLimit(ctx, options.maxRawChars) : options.maxRawChars;
       if (text.length > maxChars) {
         text = `${text.slice(0, maxChars)}\n\n[Truncated: ${text.length - maxChars} more characters]`;
       }
@@ -150,7 +152,7 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
 const RAW_CONTEXT_SHARE = 0.25;
 const RAW_CHARS_PER_TOKEN = 3;
 
-/** The cap on raw page source: `maxRawChars`, or less when that alone would crowd the session model's context window. */
+/** The default cap on raw page source: `maxRawChars`, or less when that alone would crowd the session model's context window. */
 function rawLimit(ctx: ExtensionContext, maxRawChars: number): number {
   const window = ctx.model?.contextWindow;
   return window && window > 0 ? Math.min(maxRawChars, Math.floor(window * RAW_CONTEXT_SHARE * RAW_CHARS_PER_TOKEN)) : maxRawChars;
