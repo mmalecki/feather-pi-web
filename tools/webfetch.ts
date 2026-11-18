@@ -10,6 +10,8 @@ export interface WebFetchOptions {
   compactPrompt: string;
   /** Page text beyond this many characters is dropped (before compaction). */
   maxChars: number;
+  /** The same for unprocessed page source (`raw`). Unless overridden, models with small context windows get less, see `rawLimit`. */
+  maxRawChars: number;
   maxBytes: number;
   /** Whether images are scaled down to the model's limits. Asked per fetch, so settings can change mid-session. */
   autoResizeImages: () => boolean;
@@ -26,6 +28,7 @@ export const defaultWebFetchOptions: WebFetchOptions = {
     'Drop navigation, ads and boilerplate. If a focus is given, keep only what is relevant to it ' +
     'and say so if the page does not cover it. Reply with the summary only.',
   maxChars: 50_000,
+  maxRawChars: 150_000,
   maxBytes: 5 * 1024 * 1024,
   autoResizeImages: () => true,
   timeoutMs: 30_000,
@@ -37,6 +40,8 @@ export interface WebFetchDetails {
   title: string | undefined;
   /** `provider/model` that compacted the page, if one did. */
   compactedBy: string | undefined;
+  /** Whether the page came back as fetched rather than as markdown. */
+  raw: boolean;
   /** MIME type of the attached image, if the URL was one. */
   image: string | undefined;
 }
@@ -50,16 +55,19 @@ const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'ima
 
 export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
   const options = { ...defaultWebFetchOptions, ...overrides };
+  // A cap someone chose is theirs to get wrong; only the default bends to the model.
+  const scaleRaw = overrides.maxRawChars === undefined;
 
   return defineTool({
     name: 'webfetch',
     label: 'Web Fetch',
-    description: 'Fetch a web page and return its content as markdown. Images (jpg, png, gif, webp, bmp) are returned as attachments.',
+    description: 'Fetch a web page and return its content as markdown, or as fetched with `raw`. Images (jpg, png, gif, webp, bmp) are returned as attachments.',
     promptSnippet: 'Fetch a web page as markdown, or an image',
     parameters: Type.Object({
       url: Type.String({ description: 'http(s) URL' }),
       focus: Type.Optional(Type.String({ description: 'What to look for on the page' })),
       compact: Type.Optional(Type.Boolean({ description: 'Summarize the page instead of returning it whole', default: options.compact })),
+      raw: Type.Optional(Type.Boolean({ description: 'Return the page source as fetched (e.g. HTML) instead of markdown. Large; use when the markdown is missing something' })),
     }),
     annotations: { readOnlyHint: true, openWorldHint: true },
 
@@ -72,8 +80,10 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
         redirect: 'follow',
         headers: {
           'user-agent': options.userAgent,
-          // Prefer servers that can hand us markdown directly.
-          accept: 'text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.8, image/*;q=0.5, */*;q=0.1',
+          // Prefer servers that can hand us markdown directly, unless it's the source that was asked for.
+          accept: params.raw
+            ? 'text/html;q=1.0, application/xhtml+xml;q=0.9, image/*;q=0.5, */*;q=0.1'
+            : 'text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.8, image/*;q=0.5, */*;q=0.1',
           'accept-language': 'en-US,en;q=0.9',
         },
       });
@@ -92,29 +102,31 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
         }
         return {
           content: [{ type: 'text', text: [`URL: ${finalUrl}`, '', `Image [${image?.mimeType ?? imageType}]`, ...notes].join('\n') }, ...(image ? [image] : [])],
-          details: { url: finalUrl, title: undefined, compactedBy: undefined, image: image?.mimeType } satisfies WebFetchDetails,
+          details: { url: finalUrl, title: undefined, compactedBy: undefined, raw: false, image: image?.mimeType } satisfies WebFetchDetails,
         };
       }
 
       const body = decoder(type).decode(bytes);
 
+      const html = HTML_TYPES.test(type) || (!type && /^\s*</.test(body));
+      if (!html && type && !MARKDOWN_TYPES.test(type)) throw new Error(`Unsupported content type "${type}" at ${url}`);
+
+      const raw = params.raw ?? false;
       let title: string | undefined;
       let text: string;
-      if (HTML_TYPES.test(type) || (!type && /^\s*</.test(body))) {
-        ({ title, markdown: text } = htmlToMarkdown(body, finalUrl));
-      } else if (MARKDOWN_TYPES.test(type) || !type) {
-        text = body.trim();
-      } else {
-        throw new Error(`Unsupported content type "${type}" at ${url}`);
-      }
+      if (raw) text = body;
+      else if (html) ({ title, markdown: text } = htmlToMarkdown(body, finalUrl));
+      else text = body.trim();
 
-      if (text.length > options.maxChars) {
-        text = `${text.slice(0, options.maxChars)}\n\n[Truncated: ${text.length - options.maxChars} more characters]`;
+      const maxChars = !raw ? options.maxChars : scaleRaw ? rawLimit(ctx, options.maxRawChars) : options.maxRawChars;
+      if (text.length > maxChars) {
+        text = `${text.slice(0, maxChars)}\n\n[Truncated: ${text.length - maxChars} more characters]`;
       }
 
       let usage: Usage | undefined;
       let compactedBy: string | undefined;
-      const model = (params.compact ?? options.compact) ? compactModel(ctx, options.compactModel) : undefined;
+      // Source that was asked for as fetched is not summarized.
+      const model = !raw && (params.compact ?? options.compact) ? compactModel(ctx, options.compactModel) : undefined;
       if (!text) text = '[Page has no readable content]';
       else if (model) {
         ({ text, usage } = await compact(ctx, model, {
@@ -126,14 +138,24 @@ export function webFetchTool(overrides: Partial<WebFetchOptions> = {}) {
         compactedBy = `${model.provider}/${model.id}`;
       }
 
-      const header = [title && `# ${title}`, `URL: ${finalUrl}`].filter(Boolean).join('\n');
+      const header = [title && `# ${title}`, `URL: ${finalUrl}`, raw && type && `Content-Type: ${type}`].filter(Boolean).join('\n');
       return {
         content: [{ type: 'text', text: `${header}\n\n${text}` }],
-        details: { url: finalUrl, title, compactedBy, image: undefined } satisfies WebFetchDetails,
+        details: { url: finalUrl, title, compactedBy, raw, image: undefined } satisfies WebFetchDetails,
         ...(usage ? { usage } : {}),
       };
     },
   });
+}
+
+/** Share of the context window a raw page may take, and a rough characters-per-token figure for markup. */
+const RAW_CONTEXT_SHARE = 0.25;
+const RAW_CHARS_PER_TOKEN = 3;
+
+/** The default cap on raw page source: `maxRawChars`, or less when that alone would crowd the session model's context window. */
+function rawLimit(ctx: ExtensionContext, maxRawChars: number): number {
+  const window = ctx.model?.contextWindow;
+  return window && window > 0 ? Math.min(maxRawChars, Math.floor(window * RAW_CONTEXT_SHARE * RAW_CHARS_PER_TOKEN)) : maxRawChars;
 }
 
 /** The configured compaction model, else the session's; none when the session has no model yet. */
